@@ -56,7 +56,7 @@ win_length = 1024
 n_fft = 1024
 mel_spec_type = "vocos"
 target_rms = 0.1
-cross_fade_duration = 0.15
+cross_fade_duration = 0  # ОТКЛЮЧЕН - используем простую склейку
 ode_method = "euler"
 nfe_step = 32  # 16, 32
 cfg_strength = 2.0
@@ -175,7 +175,7 @@ def transcribe(ref_audio, language=None):
         initialize_asr_pipeline(device=device)
     return asr_pipe(
         ref_audio,
-        chunk_length_s=30,
+        chunk_length_s=600,  # Увеличиваем с 30 до 600 секунд (10 минут)
         batch_size=128,
         generate_kwargs={"task": "transcribe", "language": language} if language else {"task": "transcribe"},
         return_timestamps=False,
@@ -319,29 +319,29 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print):
         )
         non_silent_wave = AudioSegment.silent(duration=0)
         for non_silent_seg in non_silent_segs:
-            if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 12000:
-                show_info("Audio is over 12s, clipping short. (1)")
+            if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 600000:
+                show_info("Audio is over 600s, clipping short. (1)")
                 break
             non_silent_wave += non_silent_seg
 
         # 2. try to find short silence for clipping if 1. failed
-        if len(non_silent_wave) > 12000:
+        if len(non_silent_wave) > 600000:
             non_silent_segs = silence.split_on_silence(
                 aseg, min_silence_len=100, silence_thresh=-40, keep_silence=1000, seek_step=10
             )
             non_silent_wave = AudioSegment.silent(duration=0)
             for non_silent_seg in non_silent_segs:
-                if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 12000:
-                    show_info("Audio is over 12s, clipping short. (2)")
+                if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 600000:
+                    show_info("Audio is over 600s, clipping short. (2)")
                     break
                 non_silent_wave += non_silent_seg
 
         aseg = non_silent_wave
 
         # 3. if no proper silence found for clipping
-        if len(aseg) > 12000:
-            aseg = aseg[:12000]
-            show_info("Audio is over 12s, clipping short. (3)")
+        if len(aseg) > 600000:
+            aseg = aseg[:600000]
+            show_info("Audio is over 600s, clipping short. (3)")
 
         aseg = remove_silence_edges(aseg) + AudioSegment.silent(duration=50)
         aseg.export(temp_path, format="wav")
@@ -523,56 +523,64 @@ def infer_batch_process(
             for chunk in process_batch(gen_text):
                 yield chunk
     else:
+        # Создаём папку для кусков заранее, если много батчей
+        parts_dir = None
+        if len(gen_text_batches) > 100:
+            import soundfile as sf
+            parts_dir = "outputs/audio_parts"
+            os.makedirs(parts_dir, exist_ok=True)
+            print(f"\n[INIT] Будет сгенерировано {len(gen_text_batches)} кусков")
+            print(f"[INIT] Куски будут сохраняться в: {parts_dir}/\n")
+
         with ThreadPoolExecutor() as executor:
             futures = [executor.submit(process_batch, gen_text) for gen_text in gen_text_batches]
-            for future in progress.tqdm(futures) if progress is not None else futures:
+            for idx, future in enumerate(progress.tqdm(futures) if progress is not None else futures):
                 result = future.result()
                 if result:
                     generated_wave, generated_mel_spec = next(result)
                     generated_waves.append(generated_wave)
                     spectrograms.append(generated_mel_spec)
 
+                    # Сохраняем кусок сразу на диск
+                    if parts_dir is not None:
+                        part_path = f"{parts_dir}/part_{idx:04d}.wav"
+                        sf.write(part_path, generated_wave, target_sample_rate)
+                        if (idx + 1) % 100 == 0:
+                            print(f"\n[PROGRESS] Сохранено {idx + 1}/{len(gen_text_batches)} кусков в {parts_dir}/")
+
         if generated_waves:
-            if cross_fade_duration <= 0:
-                # Simply concatenate
-                final_wave = np.concatenate(generated_waves)
-            else:
-                # Combine all generated waves with cross-fading
-                final_wave = generated_waves[0]
-                for i in range(1, len(generated_waves)):
-                    prev_wave = final_wave
-                    next_wave = generated_waves[i]
+            if parts_dir is not None:
+                print(f"\n[OK] Все {len(generated_waves)} кусков сохранены в {parts_dir}/!")
 
-                    # Calculate cross-fade samples, ensuring it does not exceed wave lengths
-                    cross_fade_samples = int(cross_fade_duration * target_sample_rate)
-                    cross_fade_samples = min(cross_fade_samples, len(prev_wave), len(next_wave))
+            print(f"\n[MERGE] Склейка {len(generated_waves)} кусков аудио...")
 
-                    if cross_fade_samples <= 0:
-                        # No overlap possible, concatenate
-                        final_wave = np.concatenate([prev_wave, next_wave])
-                        continue
+            # БЫСТРАЯ СКЛЕЙКА O(n) - выделяем память один раз и копируем куски
+            print("[CONCAT] Быстрая склейка без cross-fade...")
 
-                    # Overlapping parts
-                    prev_overlap = prev_wave[-cross_fade_samples:]
-                    next_overlap = next_wave[:cross_fade_samples]
+            # Шаг 1: Считаем общую длину
+            total_samples = sum(len(wave) for wave in generated_waves)
 
-                    # Fade out and fade in
-                    fade_out = np.linspace(1, 0, cross_fade_samples)
-                    fade_in = np.linspace(0, 1, cross_fade_samples)
+            # Шаг 2: Выделяем память один раз
+            final_wave = np.zeros(total_samples, dtype=np.float32)
 
-                    # Cross-faded overlap
-                    cross_faded_overlap = prev_overlap * fade_out + next_overlap * fade_in
+            # Шаг 3: Копируем каждый кусок один раз
+            offset = 0
+            for i, wave in enumerate(generated_waves):
+                chunk_len = len(wave)
+                final_wave[offset:offset + chunk_len] = wave
+                offset += chunk_len
 
-                    # Combine
-                    new_wave = np.concatenate(
-                        [prev_wave[:-cross_fade_samples], cross_faded_overlap, next_wave[cross_fade_samples:]]
-                    )
+                if len(generated_waves) > 1000 and (i + 1) % 1000 == 0:
+                    print(f"   [PROGRESS] Склеено {i + 1}/{len(generated_waves)} кусков")
 
-                    final_wave = new_wave
+            print(f"[OK] Склейка завершена за O(n) операций!")
 
-            # Create a combined spectrogram
-            combined_spectrogram = np.concatenate(spectrograms, axis=1)
+            # Спектрограмма отключена для ускорения
+            # print("[SPECTROGRAM] Создание спектрограммы...")
+            # combined_spectrogram = np.concatenate(spectrograms, axis=1)
+            combined_spectrogram = None
 
+            print("[DONE] Склейка завершена!")
             yield final_wave, target_sample_rate, combined_spectrogram
 
         else:
