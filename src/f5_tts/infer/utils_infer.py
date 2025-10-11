@@ -476,6 +476,10 @@ def infer_batch_process(
         text_list = [ref_text + gen_text]
         final_text_list = convert_char_to_pinyin(text_list)
 
+        # DEBUG: Логирование текста
+        print(f"\n[DEBUG] gen_text ({len(gen_text)} chars): {gen_text[:80]}...")
+        print(f"[DEBUG] full_text: {text_list[0][:120]}...")
+
         ref_audio_len = audio.shape[-1] // hop_length
         if fix_duration is not None:
             duration = int(fix_duration * target_sample_rate / hop_length)
@@ -500,6 +504,12 @@ def infer_batch_process(
             generated = generated.to(torch.float32)  # generated mel spectrogram
             generated = generated[:, ref_audio_len:, :]
             generated = generated.permute(0, 2, 1)
+
+            # DEBUG: Проверка длины
+            expected_len = int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+            actual_len = generated.shape[-1]
+            if actual_len < expected_len * 0.9:
+                print(f"\n[WARNING] Сгенерировано короче ожидаемого: {actual_len} < {expected_len} (90%)")
             if mel_spec_type == "vocos":
                 generated_wave = vocoder.decode(generated)
             elif mel_spec_type == "bigvgan":
