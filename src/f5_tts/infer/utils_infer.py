@@ -564,26 +564,35 @@ def infer_batch_process(
 
             print(f"\n[MERGE] Склейка {len(generated_waves)} кусков аудио...")
 
-            # БЫСТРАЯ СКЛЕЙКА O(n) - выделяем память один раз и копируем куски
-            print("[CONCAT] Быстрая склейка без cross-fade...")
+            # БЫСТРАЯ СКЛЕЙКА O(n) с тишиной между кусками
+            print("[CONCAT] Быстрая склейка с безопасной паузой...")
 
-            # Шаг 1: Считаем общую длину
+            # Добавляем 0.1 секунды тишины между кусками (2400 сэмплов при 24kHz)
+            silence_samples = int(0.1 * target_sample_rate)
+            silence = np.zeros(silence_samples, dtype=np.float32)
+
+            # Шаг 1: Считаем общую длину (куски + тишина между ними)
             total_samples = sum(len(wave) for wave in generated_waves)
+            total_samples += silence_samples * (len(generated_waves) - 1)  # Тишина между кусками
 
             # Шаг 2: Выделяем память один раз
             final_wave = np.zeros(total_samples, dtype=np.float32)
 
-            # Шаг 3: Копируем каждый кусок один раз
+            # Шаг 3: Копируем каждый кусок + тишина
             offset = 0
             for i, wave in enumerate(generated_waves):
                 chunk_len = len(wave)
                 final_wave[offset:offset + chunk_len] = wave
                 offset += chunk_len
 
+                # Добавляем тишину после куска (кроме последнего)
+                if i < len(generated_waves) - 1:
+                    offset += silence_samples  # Пропускаем тишину (уже zeros)
+
                 if len(generated_waves) > 1000 and (i + 1) % 1000 == 0:
                     print(f"   [PROGRESS] Склеено {i + 1}/{len(generated_waves)} кусков")
 
-            print(f"[OK] Склейка завершена за O(n) операций!")
+            print(f"[OK] Склейка завершена! Добавлено {(len(generated_waves) - 1) * 0.1:.1f}с тишины")
 
             # Спектрограмма отключена для ускорения
             # print("[SPECTROGRAM] Создание спектрограммы...")
