@@ -9,6 +9,8 @@ import tempfile
 from collections import OrderedDict
 from functools import lru_cache
 from importlib.resources import files
+from pathlib import Path
+from datetime import datetime
 
 import click
 import gradio as gr
@@ -49,6 +51,10 @@ from f5_tts.model import DiT, UNetT
 
 DEFAULT_TTS_MODEL = "F5-TTS_v1"
 tts_model_choice = DEFAULT_TTS_MODEL
+
+# Voice management
+VOICES_DIR = Path("voices")
+VOICES_DIR.mkdir(exist_ok=True)
 
 DEFAULT_TTS_MODEL_CFG = [
     "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
@@ -126,6 +132,115 @@ def load_text_from_file(file):
     else:
         text = ""
     return gr.update(value=text)
+
+
+# Voice Management Functions
+def load_saved_voices():
+    """Load list of saved voices from voices/ directory"""
+    voices = []
+    if VOICES_DIR.exists():
+        for voice_dir in sorted(VOICES_DIR.iterdir()):
+            if voice_dir.is_dir():
+                metadata_file = voice_dir / "metadata.json"
+                if metadata_file.exists():
+                    voices.append(voice_dir.name)
+    return voices
+
+
+def get_voice_path(voice_name):
+    """Get paths for a saved voice"""
+    voice_dir = VOICES_DIR / voice_name
+    audio_path = voice_dir / "audio.wav"
+    metadata_path = voice_dir / "metadata.json"
+    return voice_dir, audio_path, metadata_path
+
+
+def save_voice(voice_name, audio_path, ref_text, trim_start, trim_end):
+    """Save a new voice with trimmed audio"""
+    if not voice_name or not voice_name.strip():
+        gr.Warning("Please enter a voice name")
+        return "Please enter a voice name", gr.update()
+
+    if not audio_path:
+        gr.Warning("Please upload audio")
+        return "Please upload audio", gr.update()
+
+    voice_name = voice_name.strip()
+    voice_dir, audio_save_path, metadata_path = get_voice_path(voice_name)
+    voice_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Load audio
+        audio_data, sample_rate = sf.read(audio_path)
+
+        # Apply trimming
+        start_sample = int(trim_start * sample_rate)
+        end_sample = int(trim_end * sample_rate)
+
+        if end_sample > len(audio_data):
+            end_sample = len(audio_data)
+        if start_sample >= end_sample:
+            gr.Warning("Invalid trim range")
+            return "Invalid trim range", gr.update()
+
+        trimmed_audio = audio_data[start_sample:end_sample]
+
+        # Save trimmed audio
+        sf.write(str(audio_save_path), trimmed_audio, sample_rate)
+
+        # Save metadata
+        metadata = {
+            "ref_text": ref_text,
+            "created": datetime.now().isoformat(),
+            "sample_rate": sample_rate,
+            "duration": len(trimmed_audio) / sample_rate
+        }
+
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        message = f"Voice '{voice_name}' saved successfully!"
+        print(f"[VOICE] {message}")
+        return message, gr.update(choices=load_saved_voices(), value=voice_name)
+
+    except Exception as e:
+        error_msg = f"Error saving voice: {e}"
+        gr.Warning(error_msg)
+        return error_msg, gr.update()
+
+
+def load_voice(voice_name):
+    """Load a saved voice and return its audio path and ref text"""
+    if not voice_name:
+        return None, ""
+
+    voice_dir, audio_path, metadata_path = get_voice_path(voice_name)
+
+    if not audio_path.exists():
+        gr.Warning(f"Voice '{voice_name}' not found")
+        return None, ""
+
+    # Load metadata
+    ref_text = ""
+    if metadata_path.exists():
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+            ref_text = metadata.get("ref_text", "")
+
+    return str(audio_path), ref_text
+
+
+def update_trim_slider_max(audio_path):
+    """Update trim slider maximum based on audio duration"""
+    if not audio_path:
+        return gr.update(maximum=30), gr.update(maximum=30, value=10)
+
+    try:
+        audio_data, sample_rate = sf.read(audio_path)
+        duration = len(audio_data) / sample_rate
+        return gr.update(maximum=duration, value=0), gr.update(maximum=duration, value=duration)
+    except:
+        return gr.update(maximum=30), gr.update(maximum=30, value=10)
 
 
 @lru_cache(maxsize=1000)  # NOTE. need to ensure params of infer() hashable
@@ -211,6 +326,34 @@ def infer(
 
 with gr.Blocks() as app_tts:
     gr.Markdown("# Batched TTS")
+
+    # Voice Management Section
+    with gr.Accordion("Voice Library", open=True):
+        with gr.Row():
+            voice_dropdown = gr.Dropdown(
+                label="Saved Voices",
+                choices=load_saved_voices(),
+                value=None,
+                interactive=True,
+                scale=3
+            )
+            load_voice_btn = gr.Button("Load Voice", variant="secondary", scale=1)
+            refresh_voices_btn = gr.Button("Refresh", scale=1)
+
+        with gr.Accordion("Save New Voice", open=False):
+            voice_name_input = gr.Textbox(label="Voice Name", placeholder="Enter a name for this voice")
+            voice_audio_input = gr.Audio(label="Audio to Save", type="filepath")
+            with gr.Row():
+                trim_start = gr.Slider(0, 30, 0, label="Trim Start (s)", step=0.1)
+                trim_end = gr.Slider(0, 30, 10, label="Trim End (s)", step=0.1)
+            voice_ref_text_input = gr.Textbox(
+                label="Reference Text",
+                lines=3,
+                placeholder="Enter the text spoken in the reference audio"
+            )
+            save_voice_btn = gr.Button("Save Voice", variant="primary")
+            save_voice_status = gr.Textbox(label="Status", interactive=False, show_label=False)
+
     ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
     with gr.Row():
         gen_text_input = gr.Textbox(
@@ -316,6 +459,30 @@ with gr.Blocks() as app_tts:
         lambda: [None, None],
         None,
         [ref_text_input, ref_text_file],
+    )
+
+    # Voice Management Event Handlers
+    load_voice_btn.click(
+        load_voice,
+        inputs=[voice_dropdown],
+        outputs=[ref_audio_input, ref_text_input]
+    )
+
+    refresh_voices_btn.click(
+        lambda: gr.update(choices=load_saved_voices()),
+        outputs=[voice_dropdown]
+    )
+
+    voice_audio_input.upload(
+        update_trim_slider_max,
+        inputs=[voice_audio_input],
+        outputs=[trim_start, trim_end]
+    )
+
+    save_voice_btn.click(
+        save_voice,
+        inputs=[voice_name_input, voice_audio_input, voice_ref_text_input, trim_start, trim_end],
+        outputs=[save_voice_status, voice_dropdown]
     )
 
     generate_btn.click(
