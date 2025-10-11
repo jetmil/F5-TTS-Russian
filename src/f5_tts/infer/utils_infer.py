@@ -533,14 +533,14 @@ def infer_batch_process(
             for chunk in process_batch(gen_text):
                 yield chunk
     else:
-        # Создаём папку для кусков заранее, если много батчей
-        parts_dir = None
-        if len(gen_text_batches) > 100:
-            import soundfile as sf
-            parts_dir = "outputs/audio_parts"
-            os.makedirs(parts_dir, exist_ok=True)
-            print(f"\n[INIT] Будет сгенерировано {len(gen_text_batches)} кусков")
-            print(f"[INIT] Куски будут сохраняться в: {parts_dir}/\n")
+        # Создаём папку для кусков заранее (ВСЕГДА для диагностики)
+        import soundfile as sf
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        parts_dir = f"outputs/audio_parts_{timestamp}"
+        os.makedirs(parts_dir, exist_ok=True)
+        print(f"\n[INIT] Будет сгенерировано {len(gen_text_batches)} кусков")
+        print(f"[INIT] Куски будут сохраняться в: {parts_dir}/\n")
 
         with ThreadPoolExecutor() as executor:
             futures = [executor.submit(process_batch, gen_text) for gen_text in gen_text_batches]
@@ -552,15 +552,19 @@ def infer_batch_process(
                     spectrograms.append(generated_mel_spec)
 
                     # Сохраняем кусок сразу на диск
-                    if parts_dir is not None:
-                        part_path = f"{parts_dir}/part_{idx:04d}.wav"
-                        sf.write(part_path, generated_wave, target_sample_rate)
-                        if (idx + 1) % 100 == 0:
-                            print(f"\n[PROGRESS] Сохранено {idx + 1}/{len(gen_text_batches)} кусков в {parts_dir}/")
+                    part_path = f"{parts_dir}/part_{idx:04d}.wav"
+                    sf.write(part_path, generated_wave, target_sample_rate)
+
+                    # Сохраняем также текст куска для диагностики
+                    text_path = f"{parts_dir}/part_{idx:04d}.txt"
+                    with open(text_path, 'w', encoding='utf-8') as f:
+                        f.write(gen_text_batches[idx])
+
+                    if (idx + 1) % 100 == 0:
+                        print(f"\n[PROGRESS] Сохранено {idx + 1}/{len(gen_text_batches)} кусков в {parts_dir}/")
 
         if generated_waves:
-            if parts_dir is not None:
-                print(f"\n[OK] Все {len(generated_waves)} кусков сохранены в {parts_dir}/!")
+            print(f"\n[OK] Все {len(generated_waves)} кусков сохранены в {parts_dir}/!")
 
             print(f"\n[MERGE] Склейка {len(generated_waves)} кусков аудио...")
 
