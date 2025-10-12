@@ -73,6 +73,7 @@ fix_duration = None
 def chunk_text(text, max_chars=135):
     """
     Splits the input text into chunks, each with a maximum number of characters.
+    MODIFIED: Разбивает только по концу предложения (. ! ?), НЕ по запятым!
 
     Args:
         text (str): The text to be split.
@@ -83,16 +84,24 @@ def chunk_text(text, max_chars=135):
     """
     chunks = []
     current_chunk = ""
-    # Split the text into sentences based on punctuation followed by whitespace
-    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
+    # ИЗМЕНЕНО: Split ТОЛЬКО по концу предложения (. ! ?), убрали ; : ,
+    # Старая версия разбивала по всем знакам: [;:,.!?]
+    sentences = re.split(r"(?<=[.!?])\s+|(?<=[。！？])", text)
 
     for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
         if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
-            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+            if current_chunk:
+                current_chunk += " " + sentence
+            else:
+                current_chunk = sentence
         else:
             if current_chunk:
                 chunks.append(current_chunk.strip())
-            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+            current_chunk = sentence
 
     if current_chunk:
         chunks.append(current_chunk.strip())
@@ -551,9 +560,18 @@ def infer_batch_process(
                     generated_waves.append(generated_wave)
                     spectrograms.append(generated_mel_spec)
 
+                    # ДОБАВЛЕНО: Добавляем тишину в конец фрагмента (0.5 секунды)
+                    silence_duration = 0.5  # секунд
+                    silence_samples = int(silence_duration * target_sample_rate)
+                    silence_padding = np.zeros(silence_samples, dtype=generated_wave.dtype)
+                    generated_wave_with_silence = np.concatenate([generated_wave, silence_padding])
+
                     # Сохраняем кусок сразу на диск
                     part_path = f"{parts_dir}/part_{idx:04d}.wav"
-                    sf.write(part_path, generated_wave, target_sample_rate)
+                    sf.write(part_path, generated_wave_with_silence, target_sample_rate)
+
+                    # Для склейки используем оригинальный wave БЕЗ тишины
+                    # (тишина уже добавляется в строке 506)
 
                     # Сохраняем также текст куска для диагностики
                     text_path = f"{parts_dir}/part_{idx:04d}.txt"
