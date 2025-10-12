@@ -1,0 +1,6 @@
+# RUAccent dependencies for Russian stress placement
+ruaccent>=1.5.8
+huggingface_hub
+onnxruntime
+transformers
+sentencepiece
