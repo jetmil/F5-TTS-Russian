@@ -73,7 +73,7 @@ fix_duration = None
 def chunk_text(text, max_chars=135):
     """
     Splits the input text into chunks, each with a maximum number of characters.
-    MODIFIED: Разбивает только по концу предложения (. ! ?), НЕ по запятым!
+    MODIFIED: Разбивает только по концу предложения (. ! ? ;), НЕ по запятым!
 
     Args:
         text (str): The text to be split.
@@ -84,9 +84,9 @@ def chunk_text(text, max_chars=135):
     """
     chunks = []
     current_chunk = ""
-    # ИЗМЕНЕНО: Split ТОЛЬКО по концу предложения (. ! ?), убрали ; : ,
-    # Старая версия разбивала по всем знакам: [;:,.!?]
-    sentences = re.split(r"(?<=[.!?])\s+|(?<=[。！？])", text)
+    # ИЗМЕНЕНО: Split по концу предложения (. ! ? ;), убрали : ,
+    # Добавлена точка с запятой (;) как граница предложения
+    sentences = re.split(r"(?<=[.!?;])\s+|(?<=[。！？；])", text)
 
     for sentence in sentences:
         sentence = sentence.strip()
