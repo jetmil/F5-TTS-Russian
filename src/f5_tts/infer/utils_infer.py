@@ -72,8 +72,12 @@ fix_duration = None
 
 def chunk_text(text, max_chars=135):
     """
-    Splits the input text into chunks, each with a maximum number of characters.
-    MODIFIED: Разбивает только по концу предложения (. ! ? ;), НЕ по запятым!
+    Умная разбивка текста для озвучки с учетом интонации и времени генерации.
+
+    СТРАТЕГИЯ:
+    1. Короткие предложения (≤10 слов) → берем целиком (точки, восклицания, вопросы)
+    2. Длинные предложения (>10 слов) → режем по запятым/двоеточиям/тире/точкам с запятой
+    3. Ограничение: ~24 слова на чанк (16 сек * 1.5 слова/сек = безопасно для F5-TTS)
 
     Args:
         text (str): The text to be split.
@@ -84,8 +88,8 @@ def chunk_text(text, max_chars=135):
     """
     chunks = []
     current_chunk = ""
-    # ИЗМЕНЕНО: Split по концу предложения (. ! ? ;), убрали : ,
-    # Добавлена точка с запятой (;) как граница предложения
+
+    # Шаг 1: Разбиваем по концу предложения (. ! ? ;)
     sentences = re.split(r"(?<=[.!?;])\s+|(?<=[。！？；])", text)
 
     for sentence in sentences:
@@ -93,16 +97,54 @@ def chunk_text(text, max_chars=135):
         if not sentence:
             continue
 
-        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+        # Считаем количество слов в предложении
+        word_count = len(sentence.split())
+
+        # АДАПТИВНАЯ ЛОГИКА:
+        # Короткие предложения (≤10 слов) → берем целиком
+        if word_count <= 10:
+            # Проверяем, влезает ли в текущий чанк
             if current_chunk:
-                current_chunk += " " + sentence
+                combined = current_chunk + " " + sentence
+                combined_words = len(combined.split())
+                combined_bytes = len(combined.encode("utf-8"))
+
+                # Проверка: макс 24 слова И макс байт
+                if combined_words <= 24 and combined_bytes <= max_chars:
+                    current_chunk = combined
+                else:
+                    # Не влезает → сохраняем текущий чанк
+                    chunks.append(current_chunk.strip())
+                    current_chunk = sentence
             else:
                 current_chunk = sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence
 
+        # Длинные предложения (>10 слов) → режем по запятым/двоеточиям/тире
+        else:
+            # Разбиваем по запятым, двоеточиям, тире, точкам с запятой
+            sub_parts = re.split(r"(?<=[,:;—–-])\s+", sentence)
+
+            for part in sub_parts:
+                part = part.strip()
+                if not part:
+                    continue
+
+                if current_chunk:
+                    combined = current_chunk + " " + part
+                    combined_words = len(combined.split())
+                    combined_bytes = len(combined.encode("utf-8"))
+
+                    # Проверка: макс 24 слова И макс байт
+                    if combined_words <= 24 and combined_bytes <= max_chars:
+                        current_chunk = combined
+                    else:
+                        # Не влезает → сохраняем текущий чанк
+                        chunks.append(current_chunk.strip())
+                        current_chunk = part
+                else:
+                    current_chunk = part
+
+    # Добавляем последний чанк
     if current_chunk:
         chunks.append(current_chunk.strip())
 
